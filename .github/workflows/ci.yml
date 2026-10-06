@@ -1,0 +1,20 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install ruff dbt-postgres
+      - name: lint
+        run: ruff check --select E,F,B --ignore E501,B008,E741 .
+      - name: dbt project parses (models, tests, refs)
+        run: dbt parse --project-dir pipeline/dbt --profiles-dir pipeline/dbt
+      - name: airflow DAG and services compile
+        run: python -m py_compile pipeline/dags/respawn_daily.py pipeline/ingest.py simulator/simulate.py backend/app/*.py recsys/train.py
+  # Integration tests (backend/tests) need the 5M-row Steam load, so they run
+  # locally against docker compose rather than in CI.

@@ -1,0 +1,30 @@
+version: 2
+models:
+  - name: dim_game
+    columns:
+      - name: game_id
+        tests: [unique, not_null]
+  - name: dim_user
+    columns:
+      - name: user_id
+        tests: [unique, not_null]
+  - name: fct_orders
+    columns:
+      - name: order_id
+        tests: [unique, not_null]
+      - name: game_id
+        tests:
+          - relationships: {to: ref('dim_game'), field: game_id}
+      - name: user_id
+        tests:
+          - relationships: {to: ref('dim_user'), field: user_id}
+      - name: revenue
+        tests: [not_null]
+  - name: fct_events
+    columns:
+      - name: event_id
+        tests: [unique, not_null]
+  - name: agg_daily_kpis
+    columns:
+      - name: date_day
+        tests: [unique, not_null]

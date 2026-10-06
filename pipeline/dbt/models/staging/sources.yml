@@ -1,0 +1,30 @@
+version: 2
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: games
+      - name: game_genres
+      - name: users
+      - name: user_items
+      - name: reviews
+      - name: events
+        loaded_at_field: event_ts
+        freshness:
+          warn_after: {count: 400, period: day}
+          error_after: {count: 800, period: day}
+models:
+  - name: stg_events
+    columns:
+      - name: event_id
+        tests: [unique, not_null]
+      - name: event_type
+        tests:
+          - accepted_values:
+              values: [page_view, game_click, wishlist_add, add_to_cart, purchase]
+      - name: variant
+        tests: [{accepted_values: {values: [control, treatment]}}]
+  - name: stg_games
+    columns:
+      - name: game_id
+        tests: [unique, not_null]

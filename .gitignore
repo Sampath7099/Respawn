@@ -1,0 +1,10 @@
+.venv/
+data/raw/
+pipeline/dbt/target/
+pipeline/dbt/logs/
+logs/
+__pycache__/
+recsys/artifacts/
+logs_*.txt
+load_*.txt
+pipeline/dbt/.user.yml

@@ -1,0 +1,12 @@
+respawn:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('PGHOST', 'localhost') }}"
+      port: "{{ env_var('PGPORT', '5433') | int }}"
+      user: respawn
+      password: respawn
+      dbname: respawn
+      schema: dw
+      threads: 4

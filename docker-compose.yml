@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: respawn
+      POSTGRES_PASSWORD: respawn
+      POSTGRES_DB: respawn
+    ports: ["5433:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U respawn"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6380:6379"]
+
+  redpanda:  # Kafka-compatible broker, single binary, light on RAM
+    image: redpandadata/redpanda:v24.2.7
+    command: >
+      redpanda start --overprovisioned --smp 1 --memory 512M --mode dev-container
+      --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports: ["19092:19092"]
+
+  airflow:
+    image: apache/airflow:2.10.4-python3.12
+    command: standalone
+    profiles: ["pipeline"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/respawn/pipeline/dags
+      _PIP_ADDITIONAL_REQUIREMENTS: "dbt-postgres==1.9.0 psycopg[binary]"
+      RESPAWN_DSN: postgresql://respawn:respawn@postgres:5432/respawn
+      PGHOST: postgres
+      PGPORT: "5432"
+    ports: ["8080:8080"]
+    volumes: [".:/opt/respawn"]
+
+volumes:
+  pgdata:

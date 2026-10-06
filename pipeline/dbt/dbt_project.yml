@@ -1,0 +1,8 @@
+name: respawn
+version: "1.0"
+profile: respawn
+model-paths: ["models"]
+models:
+  respawn:
+    staging: {+materialized: view, +schema: staging}
+    marts: {+materialized: table, +schema: marts}

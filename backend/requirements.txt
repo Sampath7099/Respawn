@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+psycopg[binary]
+psycopg-pool
+redis
+PyJWT
+confluent-kafka
+httpx
+pytest

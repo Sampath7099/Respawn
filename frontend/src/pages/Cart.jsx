@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, price } from "../api.js";
+import { api, coverUrl, price } from "../api.js";
 import { useCart } from "../cart.jsx";
+import { useToast } from "../components/ui.jsx";
 
 export default function Cart() {
   const { items, remove, clear } = useCart();
-  const [status, setStatus] = useState(null);
+  const [receipt, setReceipt] = useState(null);
   const [busy, setBusy] = useState(false);
+  const toast = useToast();
   // One idempotency key per cart: retrying the same cart reuses it (never charged
   // twice); changing the cart makes a new key (the server rejects a reused key for a different cart).
   const key = useRef(crypto.randomUUID());
@@ -24,36 +26,70 @@ export default function Cart() {
         body: { game_ids: items.map((g) => g.game_id) },
         headers: { "Idempotency-Key": key.current },
       });
-      setStatus({ ok: true, text: `Order #${res.order_id} confirmed: $${res.total.toFixed(2)} charged. Games added to your library.` });
+      setReceipt({ ...res, titles: items.map((g) => g.title) });
       clear();
+      toast(`Order #${res.order_id} confirmed`);
     } catch (e) {
-      setStatus({ ok: false, text: e.message });
+      toast(e.message, "err");
     } finally {
       setBusy(false);
     }
   };
 
+  if (receipt) {
+    return (
+      <section className="cart">
+        <div className="receipt">
+          <span className="chip-mono">TRANSACTION COMPLETE</span>
+          <h1 className="section-title">Order #{receipt.order_id}</h1>
+          {receipt.titles.map((t) => (
+            <div key={t} className="receipt-line mono">
+              <span>+ {t}</span>
+            </div>
+          ))}
+          <div className="receipt-total mono">
+            CHARGED <b>${receipt.total.toFixed(2)}</b>
+          </div>
+          <div className="buy">
+            <Link to="/library" className="btn primary">Open library</Link>
+            <Link to="/" className="btn ghost">Keep shopping</Link>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section className="cart">
-      <h1>Your cart</h1>
-      {status && <p className={status.ok ? "success" : "error"}>{status.text}</p>}
-      {!items.length && !status && (
-        <p className="muted">
-          Empty. <Link to="/browse">Go find something.</Link>
-        </p>
+      <div className="page-head">
+        <h1 className="section-title">Your cart</h1>
+        <span className="chip-mono">{items.length} ITEM{items.length === 1 ? "" : "S"}</span>
+      </div>
+      {!items.length && (
+        <div className="empty">
+          <span className="mono neon-pink">CART EMPTY</span>
+          <p className="muted">
+            <Link to="/browse" className="link">Go find something ▸</Link>
+          </p>
+        </div>
       )}
       {items.map((g) => (
         <div key={g.game_id} className="cart-line">
+          <img src={coverUrl(g.game_id)} alt="" />
           <Link to={`/game/${g.game_id}`}>{g.title}</Link>
-          <span>{price(g.price)}</span>
-          <button className="ghost" onClick={() => remove(g.game_id)}>Remove</button>
+          <span className="price">{price(g.price)}</span>
+          <button className="ghost small" onClick={() => remove(g.game_id)} aria-label={`Remove ${g.title}`}>
+            ✕
+          </button>
         </div>
       ))}
       {items.length > 0 && (
         <div className="cart-total">
-          <span>Estimated total {price(total)}</span>
+          <span className="mono">
+            ESTIMATED TOTAL <b>{price(total)}</b>
+          </span>
           <button className="primary" disabled={busy} onClick={checkout}>
-            {busy ? "Processing…" : "Checkout"}
+            {busy ? "Processing…" : "Checkout ▸"}
           </button>
         </div>
       )}

@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { currentUser, logout, track } from "./api.js";
 import { useCart } from "./cart.jsx";
+import { Logo } from "./components/ui.jsx";
 import Admin from "./pages/Admin.jsx";
 import Browse from "./pages/Browse.jsx";
 import Cart from "./pages/Cart.jsx";
@@ -19,15 +20,18 @@ export default function App() {
   const { items } = useCart();
   const user = currentUser();
 
-  useEffect(() => track("page_view"), [location.pathname]);
+  useEffect(() => {
+    track("page_view");
+    window.scrollTo(0, 0);
+  }, [location.pathname]);
 
   if (location.pathname === "/login") return <Login />;
 
   return (
     <>
       <header className="nav">
-        <Link to="/" className="logo">
-          RE<span>SPAWN</span>
+        <Link to="/" aria-label="Respawn home">
+          <Logo />
         </Link>
         <nav>
           <NavLink to="/" end>Store</NavLink>
@@ -36,19 +40,18 @@ export default function App() {
           <NavLink to="/admin">Analytics</NavLink>
         </nav>
         <div className="nav-right">
-          <Link to="/cart" className="cart-btn">
-            Cart <b>{items.length}</b>
+          <Link to="/cart" className={`cart-btn ${items.length ? "has-items" : ""}`}>
+            CART <b key={items.length}>{items.length}</b>
           </Link>
-          <span className="user">{user}</span>
-          <button
-            className="ghost"
-            onClick={logout}
-          >
-            Log out
+          <span className="user" title={user}>
+            <i className="dot" /> {user}
+          </span>
+          <button className="ghost small" onClick={logout}>
+            Jack out
           </button>
         </div>
       </header>
-      <main>
+      <main key={location.pathname} className="page">
         <Routes>
           <Route path="/" element={<Protected><Home /></Protected>} />
           <Route path="/browse" element={<Protected><Browse /></Protected>} />
@@ -59,7 +62,10 @@ export default function App() {
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </main>
-      <footer>Built on the UCSD Steam dataset · shoppers are real Steam libraries, traffic is simulated</footer>
+      <footer>
+        <span className="mono">// RESPAWN v1</span> · UCSD Steam dataset · shoppers are real Steam libraries, traffic is
+        simulated
+      </footer>
     </>
   );
 }

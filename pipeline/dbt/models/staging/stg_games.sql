@@ -4,7 +4,8 @@ select
     developer,
     publisher,
     case when release_date_text ~ '^\d{4}-\d{2}-\d{2}$' then release_date_text::date end as release_date,
-    coalesce(price, 0)::numeric(10,2) as price,
+    price,                        -- NULL = not for sale (price was not parseable)
+    price is not null as for_sale,
     sentiment,
     early_access
 from {{ source('raw', 'games') }}

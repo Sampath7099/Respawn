@@ -8,16 +8,22 @@ models:
     columns:
       - name: user_id
         tests: [unique, not_null]
+      - name: variant
+        tests: [not_null]
+  - name: fct_order_items
+    columns:
+      - name: order_id
+        tests: [not_null]
+      - name: game_id
+        tests:
+          - relationships:
+              arguments: {to: ref('dim_game'), field: game_id}
+      - name: revenue
+        tests: [not_null]
   - name: fct_orders
     columns:
       - name: order_id
         tests: [unique, not_null]
-      - name: game_id
-        tests:
-          - relationships: {to: ref('dim_game'), field: game_id}
-      - name: user_id
-        tests:
-          - relationships: {to: ref('dim_user'), field: user_id}
       - name: revenue
         tests: [not_null]
   - name: fct_events

@@ -7,6 +7,7 @@ import ast
 import gzip
 import io
 import os
+import sys
 from pathlib import Path
 
 import psycopg
@@ -40,7 +41,15 @@ def to_price(p):
 
 def main():
     with psycopg.connect(DSN, autocommit=True) as conn, conn.cursor() as cur:
+        # the dataset is static: with --if-empty (used by the bootstrap DAG) a loaded DB is left alone
+        if "--if-empty" in sys.argv and cur.execute("SELECT to_regclass('raw.games')").fetchone()[0]                 and cur.execute("SELECT count(*) FROM raw.games").fetchone()[0]:
+            print("raw dataset already loaded, skipping")
+            return
         cur.execute(open(Path(__file__).parent / "raw_schema.sql").read())
+        # the storefront's tables are a dbt source too, so make sure they exist (same DDL the API runs)
+        with conn.transaction():
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('respawn-schema'))")
+            cur.execute((Path(__file__).resolve().parents[1] / "backend" / "schema.sql").read_text())
 
         games, genres, bad = [], [], 0
         for g in read_lines("steam_games.json.gz"):

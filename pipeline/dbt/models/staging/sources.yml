@@ -8,11 +8,18 @@ sources:
       - name: users
       - name: user_items
       - name: reviews
+      - name: sim_events
       - name: events
+        description: live storefront clickstream, written by the Kafka consumer
         loaded_at_field: event_ts
-        freshness:
-          warn_after: {count: 400, period: day}
-          error_after: {count: 800, period: day}
+        freshness:  # no live traffic for a day means the storefront or the event pipeline is down
+          warn_after: {count: 24, period: hour}
+  - name: store
+    schema: store
+    description: the storefront's own OLTP tables (source of truth for orders)
+    tables:
+      - name: orders
+      - name: order_items
 models:
   - name: stg_events
     columns:
@@ -21,10 +28,18 @@ models:
       - name: event_type
         tests:
           - accepted_values:
-              values: [page_view, game_click, rec_click, wishlist_add, add_to_cart, purchase]
+              arguments: {values: [page_view, game_click, rec_click, wishlist_add, add_to_cart, purchase]}
       - name: variant
-        tests: [{accepted_values: {values: [control, treatment]}}]
+        tests:
+          - accepted_values:
+              arguments: {values: [control, treatment]}
   - name: stg_games
     columns:
       - name: game_id
         tests: [unique, not_null]
+  - name: stg_order_items
+    columns:
+      - name: order_id
+        tests: [not_null]
+      - name: price
+        tests: [not_null]

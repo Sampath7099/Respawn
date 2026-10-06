@@ -7,6 +7,6 @@ respawn:
       port: "{{ env_var('PGPORT', '5433') | int }}"
       user: respawn
       password: respawn
-      dbname: respawn
+      dbname: "{{ env_var('PGDATABASE', 'respawn') }}"
       schema: dw
       threads: 4

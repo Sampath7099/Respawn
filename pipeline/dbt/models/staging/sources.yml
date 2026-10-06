@@ -21,7 +21,7 @@ models:
       - name: event_type
         tests:
           - accepted_values:
-              values: [page_view, game_click, wishlist_add, add_to_cart, purchase]
+              values: [page_view, game_click, rec_click, wishlist_add, add_to_cart, purchase]
       - name: variant
         tests: [{accepted_values: {values: [control, treatment]}}]
   - name: stg_games

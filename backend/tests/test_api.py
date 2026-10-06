@@ -87,3 +87,23 @@ def test_recommendations_follow_ab_arm_and_skip_owned_games(client):
         assert owned.isdisjoint(body["game_ids"])
         seen.add(body["model"])
     assert seen == {"popularity", "mf+ranker"}
+
+
+def test_me_returns_library_and_wishlist(client, auth):
+    gid = client.get("/games", params={"size": 1, "page": 3}).json()[0]["game_id"]
+    client.post(f"/wishlist/{gid}", headers=auth)
+    me = client.get("/me", headers=auth).json()
+    assert me["user_id"] == USER and me["library_size"] > 0
+    assert gid in [g["game_id"] for g in me["wishlist"]]
+
+
+def test_similar_games_exclude_the_game_itself(client):
+    gid = client.get("/games", params={"size": 1}).json()[0]["game_id"]
+    sims = client.get(f"/games/{gid}/similar").json()
+    assert len(sims) == 8 and gid not in [g["game_id"] for g in sims]
+
+
+def test_ab_readout_has_both_arms(client):
+    ab = client.get("/metrics/ab").json()
+    assert [a["variant"] for a in ab["arms"]] == ["control", "treatment"]
+    assert 0 <= ab["p_value"] <= 1

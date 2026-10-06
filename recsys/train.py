@@ -20,6 +20,8 @@ import psycopg
 import torch
 from xgboost import XGBRanker
 
+from split import is_future
+
 DSN = os.environ.get("RESPAWN_DSN", "postgresql://respawn:respawn@localhost:5433/respawn")
 OUT = Path(__file__).parent / "artifacts"
 OUT.mkdir(exist_ok=True)
@@ -35,6 +37,11 @@ with psycopg.connect(DSN) as conn:
         JOIN marts.dim_game g USING (game_id)
         WHERE g.owners >= 20""", conn)
     games = pd.read_sql("SELECT game_id, price, primary_genre, owners FROM marts.dim_game WHERE owners >= 20", conn)
+
+# shoppers' future purchases are what the simulator will buy: never train on them
+future = np.fromiter((is_future(u, g) for u, g in zip(inter.user_id, inter.game_id, strict=True)), bool, len(inter))
+inter = inter[~future]
+print(f"excluded {future.sum()} future purchases of simulated shoppers")
 
 lib_size = inter.groupby("user_id").game_id.transform("size")
 inter = inter[lib_size >= 5].copy()

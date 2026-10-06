@@ -7,3 +7,5 @@ PyJWT
 confluent-kafka
 httpx
 pytest
+numpy
+xgboost

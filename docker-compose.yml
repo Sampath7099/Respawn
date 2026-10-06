@@ -24,6 +24,37 @@ services:
       --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
     ports: ["19092:19092"]
 
+  api:
+    build: {context: ., dockerfile: backend/Dockerfile}
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment: &app_env
+      RESPAWN_DSN: postgresql://respawn:respawn@postgres:5432/respawn
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BROKERS: redpanda:9092
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-32-bytes!!}
+    volumes: ["./recsys/artifacts:/srv/recsys/artifacts:ro"]
+    ports: ["8010:8010"]
+
+  relay-publish:  # store.outbox -> Kafka
+    build: {context: ., dockerfile: backend/Dockerfile}
+    command: python -m app.relay publish
+    depends_on: [api, redpanda]
+    environment: *app_env
+    restart: unless-stopped
+
+  relay-consume:  # Kafka -> raw.events (warehouse input)
+    build: {context: ., dockerfile: backend/Dockerfile}
+    command: python -m app.relay consume
+    depends_on: [redpanda, postgres]
+    environment: *app_env
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on: [api]
+    ports: ["3000:80"]
+
   airflow:
     image: apache/airflow:2.10.4-python3.12
     command: standalone
@@ -33,7 +64,8 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/respawn/pipeline/dags
-      _PIP_ADDITIONAL_REQUIREMENTS: "dbt-postgres==1.9.0 psycopg[binary]"
+      # simulator serves the trained recommender, so it needs numpy + xgboost too
+      _PIP_ADDITIONAL_REQUIREMENTS: "dbt-postgres==1.9.0 psycopg[binary] numpy xgboost"
       RESPAWN_DSN: postgresql://respawn:respawn@postgres:5432/respawn
       PGHOST: postgres
       PGPORT: "5432"

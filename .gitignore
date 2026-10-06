@@ -8,3 +8,5 @@ recsys/artifacts/
 logs_*.txt
 load_*.txt
 pipeline/dbt/.user.yml
+frontend/node_modules/
+frontend/dist/

@@ -9,7 +9,7 @@ user's full library is used, at train time the 80% that was not held out).
 from pathlib import Path
 
 import numpy as np
-from xgboost import XGBRanker
+import xgboost as xgb
 
 ART = Path(__file__).resolve().parents[2] / "recsys" / "artifacts"
 
@@ -23,7 +23,8 @@ class Recommender:
         self.user_row = {u: i for i, u in enumerate(m["user_ids"])}
         self.pop, self.genre, self.price = m["pop"], m["genre_codes"], m["price"]
         self.log_pop = np.log1p(self.pop)
-        self.ranker = XGBRanker()
+        # plain Booster, not XGBRanker: same model file, no scikit-learn needed to serve
+        self.ranker = xgb.Booster()
         self.ranker.load_model(ART / "ranker.json")
 
     def _mask(self, scores, owned):
@@ -46,5 +47,15 @@ class Recommender:
         feats = np.column_stack([mf[cands], np.argsort(np.argsort(-mf[cands])), self.log_pop[cands],
                                  self.price[cands], affinity[self.genre[cands]],
                                  np.full(len(cands), np.log1p(len(owned)))])
-        top = cands[np.argsort(-self.ranker.predict(feats))[:k]]
+        top = cands[np.argsort(-self.ranker.predict(xgb.DMatrix(feats)))[:k]]
         return [int(self.item_game[i]) for i in top], "mf+ranker"
+
+    def similar(self, game_id, k=8):
+        """'More like this': nearest games by cosine similarity of MF item embeddings."""
+        i = self.game_item.get(game_id)
+        if i is None:
+            return []
+        norm = self.I / (np.linalg.norm(self.I, axis=1, keepdims=True) + 1e-9)
+        sims = norm @ norm[i]
+        sims[i] = -np.inf
+        return [int(self.item_game[j]) for j in np.argsort(-sims)[:k]]

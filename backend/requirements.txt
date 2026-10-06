@@ -1,11 +1,9 @@
 fastapi
-uvicorn
+uvicorn[standard]
 psycopg[binary]
 psycopg-pool
 redis
 PyJWT
 confluent-kafka
-httpx
-pytest
 numpy
 xgboost

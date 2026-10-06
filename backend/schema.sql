@@ -33,4 +33,7 @@ CREATE TABLE IF NOT EXISTS store.outbox (
     created_at   timestamptz NOT NULL DEFAULT now(),
     published_at timestamptz
 );
+-- hash of the cart an idempotency key was first used with (mismatch -> 422)
+ALTER TABLE store.orders ADD COLUMN IF NOT EXISTS request_hash text;
+
 CREATE INDEX IF NOT EXISTS outbox_unpublished ON store.outbox (id) WHERE published_at IS NULL;

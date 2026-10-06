@@ -35,12 +35,12 @@ def cached(key, ttl, load):
     return value
 
 
-def rate_limited(scope, identity, limit, window):
-    """True if this identity exceeded `limit` actions in the current window."""
+def rate_limited(scope, identity, limit, window, cost=1):
+    """True if this identity used more than `limit` units in the current window."""
     key = f"rl:{scope}:{identity}:{int(time.time()) // window}"
     try:
-        n = r.incr(key)
-        if n == 1:
+        n = r.incrby(key, cost)
+        if n == cost:
             r.expire(key, window)
         return n > limit
     except redis.RedisError:

@@ -1,6 +1,6 @@
 """Shopper load: mostly browsing, some game pages, home-page recommendations.
 
-locust -f locustfile.py --headless -u 100 -r 20 -t 60s --host http://localhost:8010
+locust -f locustfile.py --headless -u 100 -r 20 -t 60s --host http://127.0.0.1:8010  (not "localhost": on Windows it adds a ~2 s IPv6 fallback per new connection)
 """
 import random
 

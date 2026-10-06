@@ -3,21 +3,58 @@ name: ci
 on: [push, pull_request]
 
 jobs:
-  checks:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
       - run: pip install ruff dbt-postgres
-      - name: lint
-        run: ruff check --select E,F,B --ignore E501,B008,E741 .
-      - name: dbt project parses (models, tests, refs)
-        run: dbt parse --project-dir pipeline/dbt --profiles-dir pipeline/dbt
-      - name: airflow DAG and services compile
-        run: python -m py_compile pipeline/dags/respawn_daily.py pipeline/ingest.py simulator/simulate.py backend/app/*.py recsys/train.py
-  # Integration tests (backend/tests) need the 5M-row Steam load, so they run
-  # locally against docker compose rather than in CI.
+      - run: ruff check --select E,F,B --ignore E501,B008,E741 .
+      - run: dbt parse --project-dir pipeline/dbt --profiles-dir pipeline/dbt
+
+  unit:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q tests/test_unit.py
+
+  # The whole pipeline on a small synthetic dataset: ingest -> dbt (with tests) ->
+  # train -> simulate -> dbt again -> A/B readout -> API integration tests.
+  pipeline:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_USER: respawn, POSTGRES_PASSWORD: respawn, POSTGRES_DB: respawn}
+        ports: ["5433:5432"]
+        options: --health-cmd "pg_isready -U respawn" --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6380:6379"]
+    env:
+      DBT: dbt build --project-dir pipeline/dbt --profiles-dir pipeline/dbt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -r requirements.txt -r backend/requirements-dev.txt
+      - run: python scripts/make_fixture.py
+      - run: python pipeline/ingest.py
+      - run: $DBT
+      - run: python recsys/train.py
+        env: {MIN_OWNERS: "5", SEEDS: "0", MAX_EPOCHS: "3"}
+      - run: python simulator/simulate.py
+      - run: $DBT
+      - run: python analysis/ab_test.py
+      - working-directory: backend
+        run: pytest -q
+        env: {RESPAWN_TESTS_ON_MAIN_DB: "1"}  # the CI database only ever holds the fixture
 
   frontend:
     runs-on: ubuntu-latest
@@ -31,7 +68,7 @@ jobs:
 
   images:
     runs-on: ubuntu-latest
+    env: {JWT_SECRET: ci-only-not-a-real-secret}
     steps:
       - uses: actions/checkout@v4
-      - name: build all service images
-        run: docker compose build api frontend
+      - run: docker compose build api frontend

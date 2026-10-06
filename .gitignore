@@ -10,3 +10,5 @@ load_*.txt
 pipeline/dbt/.user.yml
 frontend/node_modules/
 frontend/dist/
+.env
+train_log.txt

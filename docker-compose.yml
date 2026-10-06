@@ -5,7 +5,7 @@ services:
       POSTGRES_USER: respawn
       POSTGRES_PASSWORD: respawn
       POSTGRES_DB: respawn
-    ports: ["5433:5432"]
+    ports: ["127.0.0.1:5433:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U respawn"]
@@ -14,7 +14,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports: ["6380:6379"]
+    ports: ["127.0.0.1:6380:6379"]
 
   redpanda:  # Kafka-compatible broker, single binary, light on RAM
     image: redpandadata/redpanda:v24.2.7
@@ -22,7 +22,7 @@ services:
       redpanda start --overprovisioned --smp 1 --memory 512M --mode dev-container
       --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
       --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
-    ports: ["19092:19092"]
+    ports: ["127.0.0.1:19092:19092"]
 
   api:
     build: {context: ., dockerfile: backend/Dockerfile}
@@ -32,21 +32,31 @@ services:
       RESPAWN_DSN: postgresql://respawn:respawn@postgres:5432/respawn
       REDIS_URL: redis://redis:6379/0
       KAFKA_BROKERS: redpanda:9092
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production-32-bytes!!}
+      RESPAWN_ENV: production
+      CACHE: ${CACHE:-on}  # CACHE=off disables cache-aside, for the load-test comparison
+      JWT_SECRET: ${JWT_SECRET:?copy .env.example to .env and set JWT_SECRET}
     volumes: ["./recsys/artifacts:/srv/recsys/artifacts:ro"]
-    ports: ["8010:8010"]
+    # localhost only: the public entry point is nginx (frontend), which sets X-Forwarded-For
+    ports: ["127.0.0.1:8010:8010"]
 
-  relay-publish:  # store.outbox -> Kafka
+  relay-publish:  # store.outbox -> Kafka "events"
     build: {context: ., dockerfile: backend/Dockerfile}
     command: python -m app.relay publish
     depends_on: [api, redpanda]
     environment: *app_env
     restart: unless-stopped
 
-  relay-consume:  # Kafka -> raw.events (warehouse input)
+  sink-warehouse:  # "events" -> raw.events
     build: {context: ., dockerfile: backend/Dockerfile}
-    command: python -m app.relay consume
+    command: python -m app.relay warehouse
     depends_on: [redpanda, postgres]
+    environment: *app_env
+    restart: unless-stopped
+
+  sink-trending:  # "events" -> Redis trending counters
+    build: {context: ., dockerfile: backend/Dockerfile}
+    command: python -m app.relay trending
+    depends_on: [redpanda, redis]
     environment: *app_env
     restart: unless-stopped
 
@@ -64,12 +74,12 @@ services:
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/respawn/pipeline/dags
-      # simulator serves the trained recommender, so it needs numpy + xgboost too
+      # the bootstrap DAG runs the simulator, which serves the trained model (numpy + xgboost)
       _PIP_ADDITIONAL_REQUIREMENTS: "dbt-postgres==1.9.0 psycopg[binary] numpy xgboost"
       RESPAWN_DSN: postgresql://respawn:respawn@postgres:5432/respawn
       PGHOST: postgres
       PGPORT: "5432"
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
     volumes: [".:/opt/respawn"]
 
 volumes:

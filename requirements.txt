@@ -1,8 +1,7 @@
+# pipeline, analysis and training (the API has its own backend/requirements.txt)
+-r backend/requirements.txt
 pandas
-numpy
-psycopg[binary]
-sqlalchemy
 dbt-postgres
-xgboost
-scikit-learn
 scipy
+scikit-learn  # XGBRanker during training
+torch

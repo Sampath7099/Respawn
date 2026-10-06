@@ -1,57 +1,63 @@
-"""A/B test readout: control vs treatment on buyer rate and revenue per user.
+"""A/B readout for experiment home-recs-v1.
 
-- buyer rate: two-proportion z-test
-- revenue/user (heavy-tailed): Welch t-test + bootstrap 95% CI of the difference
-- sample-ratio mismatch check first: a broken 50/50 split invalidates everything else
+Plan, fixed before looking at results:
+- Unit of randomisation and analysis: the user.
+- Guardrail first: sample-ratio mismatch (chi-square on arm sizes). If it fails, stop.
+- Primary metric: buyer rate (share of users with >= 1 order). Two-proportion z-test, alpha 0.05.
+- Secondary metrics, Holm-corrected together:
+    revenue per user (Welch t-test, plus a bootstrap CI of the difference),
+    recommendation-row click-through per user (each user's share of sessions with a
+    rec_click; Welch t-test over users, not sessions, because sessions of one user are correlated).
 """
 import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import psycopg
 from scipy import stats
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+from app.abstats import holm, two_proportion_ztest  # noqa: E402
+
 DSN = os.environ.get("RESPAWN_DSN", "postgresql://respawn:respawn@localhost:5433/respawn")
 rng = np.random.default_rng(0)
 
 with psycopg.connect(DSN) as conn:
-    df = pd.read_sql("""
-        SELECT u.user_id, u.variant,
-               count(o.order_id) > 0          AS bought,
-               coalesce(sum(o.revenue), 0)    AS revenue
-        FROM marts.dim_user u LEFT JOIN marts.fct_orders o USING (user_id)
-        GROUP BY 1, 2""", conn)
+    users = pd.read_sql("""
+        WITH sessions AS (
+            SELECT user_id, session_id, bool_or(event_type = 'rec_click') AS clicked
+            FROM marts.fct_events GROUP BY 1, 2
+        ), ctr AS (
+            SELECT user_id, avg(clicked::int) AS rec_ctr FROM sessions GROUP BY 1
+        ), spend AS (
+            SELECT user_id, count(*) AS orders, sum(revenue) AS revenue FROM marts.fct_orders GROUP BY 1
+        )
+        SELECT u.user_id, u.variant, coalesce(s.orders, 0) > 0 AS bought,
+               coalesce(s.revenue, 0)::float AS revenue, coalesce(c.rec_ctr, 0)::float AS rec_ctr
+        FROM marts.dim_user u LEFT JOIN spend s USING (user_id) LEFT JOIN ctr c USING (user_id)""", conn)
 
-    ctr = pd.read_sql("""
-        SELECT variant, count(*) AS sessions, count(*) FILTER (WHERE clicked) AS clicked
-        FROM (SELECT variant, session_id, bool_or(event_type = 'rec_click') AS clicked
-              FROM marts.fct_events GROUP BY 1, 2) s
-        GROUP BY 1""", conn).set_index("variant")
-
-c, t = df[df.variant == "control"], df[df.variant == "treatment"]
+c, t = users[users.variant == "control"], users[users.variant == "treatment"]
 
 srm_p = stats.chisquare([len(c), len(t)]).pvalue
-print(f"users: control={len(c)} treatment={len(t)}  SRM p={srm_p:.3f} "
-      f"({'OK' if srm_p > 0.01 else 'SAMPLE RATIO MISMATCH - stop'})")
+print(f"guardrail  SRM: control={len(c)} treatment={len(t)}  p={srm_p:.3f}")
+if srm_p < 0.01:
+    sys.exit("sample ratio mismatch: assignment is broken, results are not interpretable")
 
-# buyer rate
-x1, n1, x2, n2 = c.bought.sum(), len(c), t.bought.sum(), len(t)
-p_pool = (x1 + x2) / (n1 + n2)
-z = (x2 / n2 - x1 / n1) / np.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
-print(f"buyer rate: {x1/n1:.2%} -> {x2/n2:.2%}  lift={(x2/n2)/(x1/n1)-1:+.1%}  "
-      f"z={z:.2f} p={2 * stats.norm.sf(abs(z)):.2g}")
+z, p = two_proportion_ztest(c.bought.sum(), len(c), t.bought.sum(), len(t))
+lift = t.bought.mean() / c.bought.mean() - 1
+print(f"PRIMARY    buyer rate: {c.bought.mean():.2%} -> {t.bought.mean():.2%}  lift={lift:+.1%}  z={z:.2f}  p={p:.2g}"
+      f"  -> {'significant' if p < 0.05 else 'not significant'} at alpha=0.05")
 
-# revenue per user
-welch = stats.ttest_ind(t.revenue, c.revenue, equal_var=False)
 boot = [rng.choice(t.revenue.values, len(t)).mean() - rng.choice(c.revenue.values, len(c)).mean()
         for _ in range(2000)]
 lo, hi = np.percentile(boot, [2.5, 97.5])
-print(f"revenue/user: ${c.revenue.mean():.2f} -> ${t.revenue.mean():.2f}  "
-      f"Welch p={welch.pvalue:.2g}  bootstrap 95% CI of diff=[${lo:.2f}, ${hi:.2f}]")
-
-# primary metric: did the "Picked for you" row get clicked? (per session)
-(n1, x1), (n2, x2) = ctr.loc["control", ["sessions", "clicked"]], ctr.loc["treatment", ["sessions", "clicked"]]
-p_pool = (x1 + x2) / (n1 + n2)
-z = (x2 / n2 - x1 / n1) / np.sqrt(p_pool * (1 - p_pool) * (1 / n1 + 1 / n2))
-print(f"rec row CTR (per session): {x1/n1:.2%} -> {x2/n2:.2%}  lift={(x2/n2)/(x1/n1)-1:+.1%}  "
-      f"z={z:.2f} p={2 * stats.norm.sf(abs(z)):.2g}")
+secondary = {
+    "revenue / user": (c.revenue.mean(), t.revenue.mean(), stats.ttest_ind(t.revenue, c.revenue, equal_var=False).pvalue),
+    "rec row CTR / user": (c.rec_ctr.mean(), t.rec_ctr.mean(), stats.ttest_ind(t.rec_ctr, c.rec_ctr, equal_var=False).pvalue),
+}
+adjusted = holm([v[2] for v in secondary.values()])
+for (name, (a, b, raw)), adj in zip(secondary.items(), adjusted, strict=True):
+    print(f"secondary  {name}: {a:.4f} -> {b:.4f}  lift={b / a - 1:+.1%}  p={raw:.2g}  Holm p={adj:.2g}")
+print(f"           revenue / user difference, bootstrap 95% CI: [${lo:.2f}, ${hi:.2f}]")

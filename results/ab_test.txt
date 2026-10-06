@@ -1,0 +1,5 @@
+guardrail  SRM: control=7751 treatment=7750  p=0.994
+PRIMARY    buyer rate: 58.47% -> 63.05%  lift=+7.8%  z=5.83  p=5.4e-09  -> significant at alpha=0.05
+secondary  revenue / user: 12.5624 -> 15.9140  lift=+26.7%  p=1.8e-19  Holm p=1.8e-19
+secondary  rec row CTR / user: 0.2151 -> 0.2682  lift=+24.7%  p=9.2e-30  Holm p=1.8e-29
+           revenue / user difference, bootstrap 95% CI: [$2.65, $4.07]

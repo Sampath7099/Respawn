@@ -1,159 +1,237 @@
 # Respawn
 
-A Steam-style game store that learns what you will play next. Behind the
-storefront is a complete data platform and an A/B-tested recommender:
+A Steam-style game store with a recommender, an A/B test, and the data platform
+behind them. Every number below comes from a file in [`results/`](results/).
 
 ```
-React storefront ──► FastAPI ──► Postgres (orders, wishlist)      Redis (cache, rate limits)
-                        │  transactional outbox
+React ──► nginx ──► FastAPI ──► Postgres (orders, wishlist, outbox)     Redis (cache, rate limits, trending)
+                        │ transactional outbox
                         ▼
-                 Kafka (Redpanda) ──► consumer ──► raw.events
-                                                      │
-          Airflow: ingest → simulate → freshness → dbt build + 28 tests
-                                                      ▼
-                                       warehouse (star schema, marts)
-                                       ├─► SQL analytics, A/B readout, forecasting
-                                       └─► recommender training (PyTorch MF + XGBoost ranker)
-                                                      │
-                     GET /recommendations ◄───────────┘   control: popularity · treatment: model
+              relay ──► Kafka "events" ──┬──► sink-warehouse ──► raw.events ─┐
+                                         └──► sink-trending ──► Redis       │
+                                                                             ▼
+   Airflow respawn_daily: freshness ─► dbt build (models + tests) ─► marts (star schema)
+                                                                             │
+           recsys/train.py (offline) ◄──────────────────────────────────────┤
+                     │                                       analysis/ (A/B, forecast), sql/
+                     ▼
+          GET /recommendations   control: popularity · treatment: BPR-MF + XGBoost ranker
 ```
 
-## The data: real libraries, simulated shopping
+## Data: real libraries, simulated shopping
 
 **Real data:** the [UCSD Steam dataset](https://cseweb.ucsd.edu/~jmcauley/datasets.html#steam_data).
-It has 32,132 games, 87,626 users, 5,094,082 user–game library rows (with playtime)
+It has 32,132 games, 87,626 users, 5,094,082 user–game library rows with playtime,
 and 59,305 reviews.
 
-**Simulated:** the storefront traffic. There are no real shoppers, so
-`simulator/simulate.py` turns 15,545 real Steam users into shoppers for 90 days:
+**Simulated:** there are no real shoppers, so `simulator/simulate.py` turns 15,501 real
+Steam users into shoppers for 90 days. The parameters at the top of that file are
+assumptions, not measurements:
 
-- About 20% of each shopper's real library is held back as their **future**: the games
-  they will buy at Respawn (`recsys/split.py`). The recommender never trains on these.
-- Every session shows a "Picked for you" row from the shopper's A/B arm. If the row
-  contains a game from their future, they may click it and buy it.
-- Shoppers also find future games on their own, at the same rate in both arms. So
-  **any difference between arms comes from the model**, not from the simulator.
-- Activity decays and users churn, giving real-looking retention (about 50% at week 1,
-  26% at week 4).
+- **Purchases come from the real library.** About 20% of each shopper's library is
+  their "future": games they will buy (`recsys/split.py`). The model never trains on it.
+- **The recommendation row.** Every session shows a 10-game row from the shopper's arm.
+  Slot *i* is looked at with probability 0.6 / log2(*i*+2).
+- **Clicks and purchases.** A looked-at game is clicked at 45% if the shopper wants it
+  and 3% otherwise. Wanted games are often bought; others are rarely impulse-bought.
+  Unbought wanted games may be wishlisted.
+- **Row refresh.** The row is recomputed after every purchase.
+- **Organic discovery.** Shoppers also find wanted games without recommendations, at
+  the same rate in both arms.
+- **Seasonality and churn.** Purchase intent is 1.5x at weekends. Activity decays and
+  users churn, which produces the retention curves (about 50% at week 1, 26% at week 4).
+  Those curves are a consequence of the parameters, not a finding.
 
-## Data platform (`pipeline/`, `sql/`, `analysis/`)
+The live storefront writes to `raw.events` and the simulator writes to `raw.sim_events`.
+dbt unions them, and nothing ever truncates live data.
 
-- **Ingest:** `pipeline/ingest.py` validates the dataset and loads it into Postgres.
-- **Warehouse:** dbt builds a star schema (`fct_events`, `fct_orders`, `dim_game`,
-  `dim_user`, `dim_date`, `agg_daily_kpis`) with **28 data tests**.
-- **Orchestration:** the Airflow DAG `respawn_daily` runs ingest → simulate → source
-  freshness → dbt build. Any failed test fails the run and fires an alert callback.
-- **Analytics:** `sql/analytics.sql` has 8 queries: conversion funnel, weekly cohort
-  retention, top-N per genre, running and 7-day moving GMV, RFM segments (NTILE),
-  repurchase gaps (LAG), wishlist conversion, and an A/B snapshot.
+## Data platform
 
-**Bugs the data tests caught:**
+- **Ingest:** `pipeline/ingest.py` parses the dataset (Python-literal lines, not JSON)
+  and loads it. Prices that can't be parsed are stored as NULL and mean **not for sale**.
+  They are never silently priced at $0.
+- **dbt star schema:** `fct_events`, `fct_order_items` (grain: one game in an order),
+  `fct_orders` (grain: one order), `dim_game` (including review stats), `dim_user`,
+  `dim_date` and `agg_daily_kpis`. Live orders come from the store's own tables; each
+  simulated purchase is a one-item order. There are 37 models and tests, including:
+  - `assert_one_variant_per_user`: a user in both arms means assignment is broken.
+  - `assert_orders_match_order_items`: every line item is counted exactly once.
+  - `not_null(revenue)`: it can fail, because there is no fallback to 0 anymore.
+- **Airflow:** `respawn_daily` runs a live-traffic freshness check (warns after 24 h
+  without events) and then `dbt build`. `respawn_bootstrap` is run manually: it loads the
+  dataset (skipped if already loaded), simulates history, and builds. Training is a
+  separate offline step because it needs torch.
+- **SQL:** `sql/analytics.sql` has 7 questions: funnel, weekly cohort retention, top-3
+  per genre, running and 7-day GMV, RFM on orders, repurchase gaps, and wishlist
+  conversion by price band.
 
-1. **Missing prices.** 1,492 purchases had no price (games missing genre metadata).
-   The `not_null` test on `fct_orders.revenue` failed the build. The fix backfills
-   from the catalogue price.
-2. **Broken A/B split.** The first model-driven run put **all 15,545 shoppers in
-   control**. The sample-ratio-mismatch check flagged it. Cause: shoppers were picked
-   by `md5(user) % 4 == 0`, which forces `md5(user) % 2 == 0`, and unsalted `% 2` was
-   also the A/B bucket. The fix salts the experiment hash with the experiment name
-   (`backend/app/experiment.py`).
+## Recommender ([`results/recsys_metrics.json`](results/recsys_metrics.json))
 
-### A/B test: home-page recommendations (`analysis/ab_test.py`)
+Trained on 60,516 libraries, 6,079 games and 4.0M interactions, with shoppers' future
+purchases removed.
 
-| Metric | Control (popularity) | Treatment (MF + ranker) | Result |
+1. **Candidates:** BPR matrix factorisation in PyTorch (64-d, weighted by log
+   playtime), top 100.
+2. **Ranking:** XGBoost LambdaMART (`rank:ndcg`) over 5 features in
+   `recsys/features.py`. The same module is imported by training and by the API, and
+   every feature is independent of library size.
+
+**Protocol:**
+- 20% of each user's library is held out at random. Steam has no purchase timestamps,
+  so a time split isn't possible; this is a limitation.
+- Evaluation users are shuffled and split in two. The "fit" half chooses the MF epoch
+  count (validation recall peaked at 14 of 15) and trains the ranker. The "hold" half
+  (5,000 users) is used only for the numbers below.
+- Metrics are standard Recall@10 (hits / |held out|) and NDCG@10, averaged over 3 seeds.
+  The 95% bootstrap CI is computed over users.
+- The shipped model is refit on all interactions.
+
+| Model | Recall@10 | NDCG@10 | NDCG@10 95% CI |
 |---|---|---|---|
-| users | 7,777 | 7,768 | SRM p=0.94, split OK |
-| rec row CTR per session | 13.14% | 14.87% | +13.2%, p=3.5e-13 * |
-| buyer rate | 53.98% | 55.96% | **+3.7%, z=2.48, p=0.013** |
-| revenue / user | $10.02 | $11.12 | +11%, Welch p=4e-4, bootstrap 95% CI [+$0.49, +$1.69] |
+| popularity | 0.170 | 0.218 | [0.213, 0.224] |
+| BPR-MF | 0.208 ± 0.000 | 0.264 ± 0.000 | [0.258, 0.270] |
+| **BPR-MF + XGBoost ranker** | **0.226 ± 0.001** | **0.292 ± 0.001** | [0.284, 0.297] |
 
-\* Sessions from the same user are correlated, so this p-value is optimistic.
-The per-user buyer-rate test is the decision metric.
+The same item embeddings power "More like this" (cosine nearest neighbours).
 
-### Demand forecast (`analysis/forecast_demand.py`)
+## A/B test: home-recs-v1 ([`results/ab_test.txt`](results/ab_test.txt))
 
-The task is next-day orders per genre, scored on a 14-day holdout. XGBoost with lag
-and calendar features does **not** beat a 7-day moving average. The simulated demand
-has no weekly seasonality, so the baseline is close to optimal. Always ship the
-baseline unless the model beats it.
+The plan was fixed in `analysis/ab_test.py` before reading any result:
+- Users are randomised and analysed.
+- **Guardrail:** sample-ratio check.
+- **Primary metric:** buyer rate.
+- **Secondary metrics:** revenue per user and recommendation-row CTR per user,
+  Holm-corrected.
 
-## Recommender (`recsys/`)
+| | Control (popularity) | Treatment (model) | |
+|---|---|---|---|
+| users (SRM) | 7,751 | 7,750 | p = 0.99 |
+| **buyer rate (primary)** | 58.47% | 63.05% | **+7.8%, z = 5.83, p = 5e-9** |
+| revenue / user | $12.56 | $15.91 | +27%, Holm p = 2e-19, 95% CI of difference [$2.65, $4.07] |
+| rec-row CTR / user | 21.5% | 26.8% | +25%, Holm p = 2e-29 |
 
-Trained on 60,516 real libraries, 6,079 games and 4.0M interactions, with shoppers'
-future purchases excluded. Training takes about a minute on a laptop CPU.
+**What this shows and what it doesn't.** The arms differ only in the rows they show,
+so this tests the whole loop: assignment → serving → events → warehouse → analysis. It
+also shows how a better offline ranking turns into conversions under a position-biased
+click model. It is **not** evidence of real-world lift, because the effect size depends
+on the simulator's assumed click and purchase rates.
 
-1. **Candidates:** BPR matrix factorisation in PyTorch (64-d, playtime-weighted), top 100.
-2. **Ranking:** XGBoost LambdaMART (`rank:ndcg`) re-ranks the top 100 with the MF score
-   and rank, popularity, price, the user's genre affinity and library size.
+The assignment hash is salted with the experiment name (`backend/app/experiment.py`).
+An unsalted version put every shopper in control: shopper selection used
+`md5 % 4 == 0`, which implies `md5 % 2 == 0`. The SRM check caught it, and
+`test_variant_is_independent_of_shopper_selection` now guards it.
 
-| Model | Recall@10 | NDCG@10 |
+## Demand forecast ([`results/forecast.txt`](results/forecast.txt))
+
+This forecasts next-day units sold per genre over a 14-day holdout of the simulated history.
+
+| Model | MAE | WAPE |
 |---|---|---|
-| popularity | 0.220 | 0.235 |
-| BPR-MF | 0.270 | 0.275 |
-| **BPR-MF + XGBoost ranker** | **0.285** | **0.292** (+24% vs popularity) |
+| same day last week | 3.04 | 39.7% |
+| 7-day moving average | 2.22 | 29.0% |
+| XGBoost, raw orders as target | 3.03 | 39.6% |
+| **XGBoost, orders ÷ 7-day mean as target** | **2.11** | **27.6%** |
 
-These are scored on 5,000 users that the ranker never trained on. Limitation: Steam
-libraries have no purchase timestamps, so the offline holdout is a random 20% per
-user, not a time split.
-
-The same item embeddings power "More like this" on game pages (cosine nearest neighbours).
+Demand rises and then decays over the 90 days. Trees can't extrapolate, so the raw-target
+model keeps predicting training-period levels. Predicting the ratio to the recent mean
+leaves the model only the weekly shape to learn. It's a small win over a strong baseline.
 
 ## Storefront
 
-**API (`backend/`)**, built with FastAPI:
+**API (`backend/app/`)**, built with FastAPI:
 
-- **Caching and limits:** Redis cache-aside for catalogue reads, and fixed-window rate
-  limits on login and clickstream.
-- **Idempotent checkout:** an `Idempotency-Key` header plus a `UNIQUE(user_id, key)`
-  constraint. Eight simultaneous retries of one checkout create exactly one order (tested).
-- **Transactional outbox:** each event is written in the same transaction as the business
-  change. A relay ships it to Kafka (`FOR UPDATE SKIP LOCKED`). A consumer writes
-  `raw.events` idempotently and commits offsets only after the rows are durable, so
-  delivery is at-least-once with no duplicates.
-- **Recommendations:** `/recommendations` serves the A/B arm. New users fall back to
-  popularity. The XGBoost model is served as a plain Booster, so scikit-learn isn't
-  needed at runtime.
-- **Tests:** 11 integration tests against real Postgres and Redis.
+- **Auth:** demo login with any dataset user id and no password; the accounts are
+  public dataset users. The JWT is in an HttpOnly, SameSite=Strict cookie. In
+  production, `JWT_SECRET` is required (compose refuses to start without it).
+- **Checkout:**
+  - An `Idempotency-Key` is stored with a hash of the cart. A replay returns the
+    original order, and the same key with a different cart gets 422.
+  - Games you already own get 409, and games not for sale get 400.
+  - Eight concurrent retries create exactly one order (tested).
+- **Recommendations:** the per-user cache is dropped on checkout, so a bought game
+  leaves the row immediately. The model loads at boot.
+- **Outbox → Kafka:**
+  - A row is marked published only after Kafka confirms *that row*.
+  - Consumers commit offsets only after a batch is durable.
+  - Unparseable or invalid messages go to `events.dlq` with the reason.
+  - Event ids come from outbox ids, so redelivery collapses (`ON CONFLICT DO NOTHING`).
+- **Why Kafka rather than a direct INSERT:** two independent readers consume the same
+  stream. `sink-warehouse` writes `raw.events`, and `sink-trending` keeps hourly
+  "trending now" counters in Redis by event time. They lag, fail and replay separately.
+- **Rate limits and input checks:**
+  - Behind nginx, uvicorn uses `--proxy-headers`, so login limits apply per real
+    client IP, not per proxy.
+  - Clickstream limits count events, with at most 100 per batch.
+  - Query parameters are validated: bad input gets 422, never 500.
+- **Session ids** come from the browser tab (`X-Session-Id`), not from when the
+  consumer happened to run.
 
-**Frontend (`frontend/`)**, built with React + Vite:
+**Frontend (`frontend/`)**, React + Vite:
+- Pages: store with "Picked for you" and live trending, browse, game page with
+  "More like this", cart, library and wishlist, and analytics (KPIs and the A/B readout).
+- Clicks are batched, and the last batch is sent with `keepalive` on page hide.
+- The idempotency key changes whenever the cart changes.
 
-- Pages: store home with the "Picked for you" row, browse/search, game page with
-  "More like this", cart, library/wishlist, and a live analytics page (KPIs and the A/B readout).
-- Clicks are batched to `/events`. Clicks on the recommendation row are logged as `rec_click`.
-- Served by nginx, which proxies `/api` to the API (same origin, no CORS).
+**Load test** ([`results/`](results/)): Locust with 100 users for 45 s, all on one
+8-core laptop, 4 API workers, all requests passing through Redis-backed rate limiting.
 
-**Load test** (Locust, 100 users, one 8-core laptop):
+| | req/s | p50 | p95 | API CPU | Postgres CPU | Redis hit rate |
+|---|---|---|---|---|---|---|
+| cache off | 289 | 10 ms | 45 ms | 131% | 65% | – |
+| cache on | 298 | 7 ms | 23 ms | 75% | 24% | 99% |
 
-| | req/s | p50 | p95 |
-|---|---|---|---|
-| before index on `raw.user_items(user_id)` | 18 | 220 ms | ~39 s (recs) |
-| after index, cache off | 174 | 63 ms | 220 ms |
-| after index, cache on | 204 | 110 ms | 350 ms |
+- **Throughput is capped by Locust's think time,** so it barely moves. The cache's
+  effect is on latency and load: p95 halves, and database CPU drops by about 60%.
+- **Two earlier bottlenecks were found this way:** a missing index on
+  `raw.user_items(user_id)` (18 → 174 req/s), and the model lazily loading in each
+  worker on its first request (p95 1.2–5.7 s on recommendations).
+- **The `/games?size=100` row in the CSVs** is Locust's per-user setup call. Its ~2 s is
+  the Windows `localhost` IPv6 fallback on new connections, not the server: 2.4 s via
+  `localhost` vs 0.26 s via `127.0.0.1`.
 
-The index was the real fix: about 9.5x the throughput. The cache added 17% more
-throughput but not lower latency. The load generator, API and Postgres all share the
-same 8 cores, so the extra requests mostly queued.
+## Tests and CI
+
+- **Unit tests** (`backend/tests/test_unit.py`, 12): A/B assignment balance and
+  independence, the future split, z-test and Holm, scale-free features, cart hashing,
+  event validation and dead-lettering, trending buckets, and the relay marking only
+  delivered rows (with a fake producer).
+- **Integration tests** (`backend/tests/test_api.py`, 22): auth cookie, validation,
+  idempotency (replay, mismatch, concurrency), owned and not-for-sale games, the
+  clickstream, A/B serving, and cache invalidation. They refuse to run against the
+  main database.
+- **CI** (`.github/workflows/ci.yml`) runs the **whole pipeline** on a small synthetic
+  dataset (`scripts/make_fixture.py`): ingest → dbt build → train → simulate → dbt build
+  → A/B readout → all tests. It also runs lint, unit tests, the frontend build and the
+  image builds.
 
 ## Run it
 
-Put `steam_games.json.gz`, `australian_users_items.json.gz` and
-`australian_user_reviews.json.gz` (from the dataset page) in `data/raw/`. Then:
-
 ```bash
+cp .env.example .env                      # then set JWT_SECRET
 docker compose up -d postgres redis redpanda
-python -m venv .venv && .venv/Scripts/pip install -r requirements.txt torch
-python pipeline/ingest.py                  # ~5 min
-cd pipeline && dbt build --project-dir dbt --profiles-dir dbt && cd ..   # dim_game for training
-python recsys/train.py                     # ~1 min, CPU
-python simulator/simulate.py               # ~40 s, uses the trained model
-cd pipeline && dbt build --project-dir dbt --profiles-dir dbt && cd ..
-python analysis/ab_test.py
+python -m venv .venv && .venv/Scripts/pip install torch -r requirements.txt
+python pipeline/ingest.py                 # files from the dataset page in data/raw/, ~5 min
+dbt build --project-dir pipeline/dbt --profiles-dir pipeline/dbt
+python recsys/train.py                    # ~10 min CPU (3 seeds)
+python simulator/simulate.py
+dbt build --project-dir pipeline/dbt --profiles-dir pipeline/dbt
+python analysis/ab_test.py && python analysis/forecast_demand.py
 
-docker compose up -d --build               # API :8010, storefront http://localhost:3000
-docker compose --profile pipeline up -d    # Airflow :8080 (daily DAG)
-
-cd backend && pip install -r requirements.txt && pytest -q
+docker compose up -d --build              # storefront http://localhost:3000
+docker compose --profile pipeline up -d   # Airflow :8080
 ```
 
-Retraining is a separate step from the daily DAG. The simulator and the API read
-the artifacts in `recsys/artifacts/`.
+To run the tests the way CI does, use a separate database (`PGDATABASE` and
+`RESPAWN_DSN`) loaded from `python scripts/make_fixture.py`.
+
+## Known limitations
+
+- **No purchase timestamps** in Steam libraries, so the offline evaluation uses a
+  random holdout, not a time split.
+- **The A/B effect size depends on simulator assumptions.** The pipeline is real; the
+  shoppers are not.
+- **Demo auth has no passwords** by design (the accounts are public dataset users).
+- **The ranker is trained on 80%-library MF scores but serves the refit model.** Its
+  features are scale-free and it leans on MF rank, but the score scale can still shift
+  slightly.
+- **Everything runs on one machine.** The load-test numbers come from a single laptop.

@@ -1,0 +1,10 @@
+respawn-api-1 cpu=131.40%
+respawn-frontend-1 cpu=0.00%
+respawn-relay-publish-1 cpu=0.06%
+respawn-sink-trending-1 cpu=0.05%
+respawn-sink-warehouse-1 cpu=0.06%
+respawn-postgres-1 cpu=64.94%
+respawn-redis-1 cpu=0.61%
+respawn-redpanda-1 cpu=0.47%
+booksafe-db cpu=0.00%
+booksafe-redis cpu=0.57%

@@ -1,0 +1,5 @@
+holdout days=14 rows=196
+naive (last week same day) MAE=3.04  WAPE=39.7%
+7-day mean               MAE=2.22  WAPE=29.0%
+XGBoost, level target    MAE=3.03  WAPE=39.6%
+XGBoost, relative target MAE=2.11  WAPE=27.6%

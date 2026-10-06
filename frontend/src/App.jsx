@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { clearSession, getToken, track } from "./api.js";
+import { currentUser, logout, track } from "./api.js";
 import { useCart } from "./cart.jsx";
 import Admin from "./pages/Admin.jsx";
 import Browse from "./pages/Browse.jsx";
@@ -11,13 +11,13 @@ import Library from "./pages/Library.jsx";
 import Login from "./pages/Login.jsx";
 
 function Protected({ children }) {
-  return getToken() ? children : <Navigate to="/login" replace />;
+  return currentUser() ? children : <Navigate to="/login" replace />;
 }
 
 export default function App() {
   const location = useLocation();
   const { items } = useCart();
-  const user = localStorage.getItem("respawn_user");
+  const user = currentUser();
 
   useEffect(() => track("page_view"), [location.pathname]);
 
@@ -42,10 +42,7 @@ export default function App() {
           <span className="user">{user}</span>
           <button
             className="ghost"
-            onClick={() => {
-              clearSession();
-              window.location.href = "/login";
-            }}
+            onClick={logout}
           >
             Log out
           </button>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, setSession } from "../api.js";
+import { login } from "../api.js";
 
 // Demo accounts are real Steam users from the dataset, so their library,
 // A/B arm and recommendations are all real.
@@ -9,11 +9,10 @@ export default function Login() {
   const [userId, setUserId] = useState("");
   const [error, setError] = useState("");
 
-  const login = async (id) => {
+  const enter = async (id) => {
     setError("");
     try {
-      const { token } = await api("/auth/login", { method: "POST", body: { user_id: id } });
-      setSession(token, id);
+      await login(id);
       window.location.href = "/";
     } catch (e) {
       setError(e.message);
@@ -30,7 +29,7 @@ export default function Login() {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            login(userId.trim());
+            enter(userId.trim());
           }}
         >
           <input placeholder="Steam user id" value={userId} onChange={(e) => setUserId(e.target.value)} />
@@ -42,7 +41,7 @@ export default function Login() {
         <p className="muted small">Or play as a real Steam user:</p>
         <div className="chips">
           {SAMPLES.map((s) => (
-            <button key={s} className="chip" onClick={() => login(s)}>
+            <button key={s} className="chip" onClick={() => enter(s)}>
               {s}
             </button>
           ))}

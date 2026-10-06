@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, price } from "../api.js";
 import { useCart } from "../cart.jsx";
@@ -7,9 +7,12 @@ export default function Cart() {
   const { items, remove, clear } = useCart();
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
-  // One idempotency key per checkout attempt: a double click or a retry after a
-  // network error reuses it, so the server can never charge twice.
+  // One idempotency key per cart: retrying the same cart reuses it (never charged
+  // twice); changing the cart makes a new key (the server rejects a reused key for a different cart).
   const key = useRef(crypto.randomUUID());
+  useEffect(() => {
+    key.current = crypto.randomUUID();
+  }, [items]);
 
   const total = items.reduce((s, g) => s + Number(g.price), 0);
 
@@ -21,9 +24,8 @@ export default function Cart() {
         body: { game_ids: items.map((g) => g.game_id) },
         headers: { "Idempotency-Key": key.current },
       });
-      setStatus({ ok: true, text: `Order #${res.order_id} confirmed. Games added to your library.` });
+      setStatus({ ok: true, text: `Order #${res.order_id} confirmed: $${res.total.toFixed(2)} charged. Games added to your library.` });
       clear();
-      key.current = crypto.randomUUID();
     } catch (e) {
       setStatus({ ok: false, text: e.message });
     } finally {
@@ -49,7 +51,7 @@ export default function Cart() {
       ))}
       {items.length > 0 && (
         <div className="cart-total">
-          <span>Total {price(total)}</span>
+          <span>Estimated total {price(total)}</span>
           <button className="primary" disabled={busy} onClick={checkout}>
             {busy ? "Processing…" : "Checkout"}
           </button>

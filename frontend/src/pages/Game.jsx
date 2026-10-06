@@ -21,6 +21,7 @@ export default function Game() {
 
   if (!game) return <p className="muted">Loading…</p>;
   const inCart = cart.items.some((g) => g.game_id === game.game_id);
+  const forSale = game.price !== null && game.price !== undefined;
 
   return (
     <>
@@ -43,8 +44,8 @@ export default function Game() {
           </div>
           <div className="buy">
             <span className="big-price">{price(game.price)}</span>
-            <button className="primary" disabled={inCart} onClick={() => cart.add(game)}>
-              {inCart ? "In cart" : "Add to cart"}
+            <button className="primary" disabled={inCart || !forSale} onClick={() => cart.add(game)}>
+              {!forSale ? "Unavailable" : inCart ? "In cart" : "Add to cart"}
             </button>
             <button
               className="ghost"

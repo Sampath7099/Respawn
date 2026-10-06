@@ -1,55 +1,60 @@
 // Thin client for the Respawn API, plus batched clickstream tracking.
+// Auth is an HttpOnly cookie set by /auth/login, so this file never sees the token.
 
 const BASE = "/api";
 
-export function getToken() {
-  return localStorage.getItem("respawn_token");
+export const currentUser = () => localStorage.getItem("respawn_user"); // display only, not a credential
+
+// One id per browser tab session, sent with every event so the warehouse can group them.
+function sessionId() {
+  let id = sessionStorage.getItem("respawn_sid");
+  if (!id) {
+    id = crypto.randomUUID();
+    sessionStorage.setItem("respawn_sid", id);
+  }
+  return id;
 }
 
-export function setSession(token, user) {
-  localStorage.setItem("respawn_token", token);
-  localStorage.setItem("respawn_user", user);
-}
-
-export function clearSession() {
-  localStorage.removeItem("respawn_token");
-  localStorage.removeItem("respawn_user");
-}
-
-export async function api(path, { method = "GET", body, headers = {} } = {}) {
-  const token = getToken();
+export async function api(path, { method = "GET", body, headers = {}, keepalive = false } = {}) {
   const res = await fetch(BASE + path, {
     method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...headers,
-    },
+    credentials: "same-origin",
+    keepalive,
+    headers: { "Content-Type": "application/json", "X-Session-Id": sessionId(), ...headers },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) {
-    clearSession();
-    window.location.href = "/login";
+    localStorage.removeItem("respawn_user");
+    if (location.pathname !== "/login") location.href = "/login";
   }
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
-  return res.json();
+  return res.status === 204 ? null : res.json();
 }
 
-// Clickstream: buffer events and send them in one request every few seconds,
-// so browsing doesn't fire a request per click.
+export async function login(userId) {
+  await api("/auth/login", { method: "POST", body: { user_id: userId } });
+  localStorage.setItem("respawn_user", userId);
+}
+
+export async function logout() {
+  await api("/auth/logout", { method: "POST" }).catch(() => {});
+  localStorage.removeItem("respawn_user");
+  location.href = "/login";
+}
+
+// Clickstream: buffer events, send one request every few seconds.
 let queue = [];
 export function track(event_type, game_id = null) {
-  if (!getToken()) return;
-  queue.push({ event_type, game_id });
+  if (currentUser()) queue.push({ event_type, game_id });
 }
-function flush() {
-  if (!queue.length || !getToken()) return;
-  const batch = queue;
-  queue = [];
-  api("/events", { method: "POST", body: batch }).catch(() => {});
+function flush(keepalive = false) {
+  if (!queue.length || !currentUser()) return;
+  const batch = queue.splice(0, 100);
+  // keepalive lets the request outlive the page, so the last batch isn't lost on close
+  api("/events", { method: "POST", body: batch, keepalive }).catch(() => {});
 }
 setInterval(flush, 3000);
-window.addEventListener("beforeunload", flush);
+addEventListener("pagehide", () => flush(true));
 
 export const coverUrl = (id) => `https://cdn.akamai.steamstatic.com/steam/apps/${id}/header.jpg`;
-export const price = (p) => (Number(p) === 0 ? "Free" : `$${Number(p).toFixed(2)}`);
+export const price = (p) => (p === null || p === undefined ? "Not for sale" : Number(p) === 0 ? "Free" : `$${Number(p).toFixed(2)}`);
